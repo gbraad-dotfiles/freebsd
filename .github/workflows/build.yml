@@ -1,0 +1,94 @@
+name: Test FreeBSD Machine Build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Get last 3 chars of hostname
+        id: runner_id
+        run: |
+          echo "last3=${HOSTNAME: -3}" >> $GITHUB_OUTPUT
+
+      - name: Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TAILSCALE_CLIENTID }}
+          oauth-secret: ${{ secrets.TAILSCALE_SECRET }}
+          tags: tag:actions
+          hostname: "dotfiles-${{ steps.runner_id.outputs.last3 }}"
+          use-cache: 'true'
+          args: --ssh
+
+      - name: Dotfiles (install from action)
+        uses: gbraad-dotfiles/install-action@main
+        with:
+          upstream: true
+
+      - name: Install required virtualization software
+        continue-on-error: true
+        uses: gbraad-actions/setup-virtualization@v2
+
+      - name: Install containers tools (optional)
+        continue-on-error: true
+        uses: gbraad-actions/setup-container-tools@v1
+
+      - name: Install packer
+        uses: gbraad-actions/install-packer@v1
+
+      - name: Install machinefile
+        uses: gbraad-actions/zsh-action@main
+        with:
+          as_user: runner
+          run: |
+            app machinefile install
+
+      - name: Cache FreeBSD Base Image
+        id: cache-freebsd
+        uses: actions/cache@v4
+        with:
+          path: freebsd.img
+          key: freebsd-15.1-release-v1
+
+      - name: Download (unless cached)
+        if: steps.cache-freebsd.outputs.cache-hit != 'true'
+        run: |
+          URL="https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+          curl -L -o freebsd.img.xz "$URL"
+          xz -d freebsd.img.xz
+
+      - name: Run packer init and build process
+        uses: gbraad-actions/zsh-action@main
+        with:
+          as_user: runner
+          run: |
+            export PACKER_LOG=1
+            packer init  machine.pkr.hcl
+            packer build machine.pkr.hcl
+
+      - name: Create and Push Disk OCI Image
+        run: |
+          TAG=$(date +'%y%m%d')
+          IMAGE_REF="ghcr.io/${{ github.repository_owner }}/freebsd-test-disk"
+          
+          # Build the OCI wrapping container
+          podman build -t ${IMAGE_REF}:latest -f Containerfile-disk .
+          podman tag ${IMAGE_REF}:latest ${IMAGE_REF}:${TAG}
+          
+          # Login and Push
+          podman login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+          podman push ${IMAGE_REF}:latest
+          podman push ${IMAGE_REF}:${TAG}
+
+      - name: Hang around
+        if: ${{ failure() }}
+        run: |
+          sleep 18000

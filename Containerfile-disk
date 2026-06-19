@@ -1,0 +1,7 @@
+FROM scratch
+
+LABEL org.opencontainers.image.source="https://github.com/gbraad-dotfiles/freebsd"
+LABEL org.opencontainers.image.description="Standalone FreeBSD Test Cloud Image Container"
+
+COPY output-freebsd/packer-freebsd /disk.qcow2
+
